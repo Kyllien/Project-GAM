@@ -1,0 +1,116 @@
+---
+title: "Project Generalized Additif Model "
+author: "Jb.Del'Chateau & K.Romand"
+date: "10/20/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Documentation sur R Markdown
+
+Document R Markdown <http://rmarkdown.rstudio.com>.
+
+Plusieurs thèmes disponibles, cf [distill](https://rstudio.github.io/distill/) ou la [galerie](https://rmarkdown.rstudio.com/gallery.html)
+
+Etapes importantes du projet : 
+  -Nettoyage de la data
+  -Hypotheses de Modelisation :
+    -distribution
+    -variables et transformations de variables
+  -Processus de validation pour la prevision
+
+
+## Analyse descriptive des données
+
+Nous pouvons charger les données directement dans le notebook, ainsi que les librairies nécessaires au projet.
+
+```{r, echo=FALSE, message=FALSE}
+library(mgcv)
+data_train <- read.csv("data/data_train.csv", stringsAsFactors = FALSE)
+data_test <- read.csv("data/data_test.csv", stringsAsFactors = FALSE)
+```
+
+
+```{r}
+# convertissons la colonne START_TIME en colonne de date-time (classe POSIXct en R).
+data_train$START_TIME <- as.POSIXct(data_train$START_TIME, tz = "UTC", format = "%Y-%m-%dT%H:%M:%S")
+data_test$START_TIME  <- as.POSIXct(data_test$START_TIME, tz = "UTC", format = "%Y-%m-%dT%H:%M:%S")
+```
+
+##Mise en Facteur de certaines variables explicatives
+
+0 ca se passe bien
+
+```{r}
+data_train$CONNECTION_ID <- as.factor(data_train$CONNECTION_ID)
+data_train$TAP_VERSION <- as.factor(data_train$TAP_VERSION)
+data_train$TAP_EXIT_STATUS <- as.factor(data_train$TAP_EXIT_STATUS)
+
+data_test$CONNECTION_ID <- as.factor(data_test$CONNECTION_ID)
+data_test$TAP_VERSION <- as.factor(data_test$TAP_VERSION)
+data_test$TAP_EXIT_STATUS <- as.factor(data_test$TAP_EXIT_STATUS)
+
+summary(data_train)
+summary(data_test)
+```
+
+## Suppression des NA
+```{r}
+data_train <- na.omit(data_train)
+summary(data_train)
+```
+
+## Outlier de la variable à expliquer
+utlise library lubridate pour manipuler des dates
+on met en place 3 data differente en fonction de connection id car on remarque que la densite de job duration sur la totalité a 3 distribution distinctes
+```{r}
+plot(density(data_train$JOB_DURATION))
+data_train1 <- data_train[data_train$CONNECTION_ID==1,]
+plot(density(data_train1$JOB_DURATION))
+data_train2 <- data_train[data_train$CONNECTION_ID==2,]
+plot(density(data_train2$JOB_DURATION))
+data_train3 <- data_train[data_train$CONNECTION_ID==3,]
+plot(density(data_train3$JOB_DURATION))
+
+```
+En vue des plot de densite, medcouple library(robuststas), visuellement
+
+```{r}
+library(mrfDepth)
+medcouple(data_train1$JOB_DURATION)
+```
+
+
+## Modélisation par modèle additif généralisé
+
+
+Et réaliser l'apprentissage d'un modèle additif généralisé.
+
+```{r}
+gam <- gam(JOB_DURATION ~ as.factor(CONNECTION_ID), family = gaussian(), data = data_train)
+summary(gam)
+```
+
+
+```{r, fig.}
+plot(JOB_DURATION~START_TIME, type = 'l', data = data_train[data_train$CONNECTION_ID == 1, ], main = "Connection ID 1")
+lines(x= data_train$START_TIME[data_train$CONNECTION_ID == 1], y = gam$fitted.values[data_train$CONNECTION_ID == 1], col = 'red')
+```
+
+## Il est aussi possible ..
+
+D'introduire des formules mathématiques $\lambda = \ldots$, des images, etc..
+
+## Ecriture du fichier de soumission
+
+```{r}
+data_test$Predicted <- predict(gam, data_test)
+submission <- data_test[, c("ID", "Predicted")]
+colnames(submission)[1] <- "Id"
+
+write.csv(submission, "submission.csv", row.names = FALSE)
+```
+
