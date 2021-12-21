@@ -1,0 +1,823 @@
+
+
+#librairies uilis?es
+```{r}
+library(corrplot)
+library(PerformanceAnalytics)
+library(mgcv)
+library(EnvStats)
+library(RobustAFT)
+library(mrfDepth)
+library(base)
+library(gam)
+library(dplyr)
+library(MLmetrics)
+library(caret)
+library(lubridate)
+library(stringr)
+```
+
+
+#Importer les donn?es
+```{r}
+data_train<-read.csv("C:/Users/33640/OneDrive/Bureau/Modele Additif Generalise/data/data_train.csv")
+data_test<-read.csv("C:/Users/33640/OneDrive/Bureau/Modele Additif Generalise/data/data_test.csv")
+data_sample <- read.csv("C:/Users/33640/OneDrive/Bureau/Modele Additif Generalise/data/sample_solution.csv")
+```
+
+#Analyse pr?liminaire
+##conversion des colonnes start_time en colonne data time
+```{r}
+data_train$START_TIME <- as.POSIXct(data_train$START_TIME, tz = "UTC", format = "%Y-%m-%dT%H:%M:%S")
+data_test$START_TIME  <- as.POSIXct(data_test$START_TIME, tz = "UTC", format = "%Y-%m-%dT%H:%M:%S")
+```
+
+#Creation des variables Year, Month, Day, Hour et Jour de la semaine
+```{r}
+data_train$Jour <- weekdays(data_train$START_TIME)
+data_test$Jour <- weekdays(data_test$START_TIME)
+
+data_train <- data_train %>% mutate(YEAR_FC = lubridate::year(START_TIME),MONTH_FC = lubridate::month(START_TIME), DAY_FC = lubridate::day(START_TIME),HOUR_FC = lubridate::hour(START_TIME))
+data_train$HOUR_MINUTE_FC <- format(data_train$START_TIME,"%H:%M")
+data_train$HOUR_MINUTE_FC <- as.factor(data_train$HOUR_MINUTE_FC)
+data_test <- data_test %>% mutate(YEAR_FC = lubridate::year(START_TIME),MONTH_FC = lubridate::month(START_TIME), DAY_FC = lubridate::day(START_TIME),HOUR_FC = lubridate::hour(START_TIME))
+data_test$HOUR_MINUTE_FC <- format(data_test$START_TIME,"%H:%M")
+data_test$HOUR_MINUTE_FC <- as.factor(data_test$HOUR_MINUTE_FC)
+
+for(i in 6:11){
+  command <- str_c("data_train$",colnames(data_train[i]),"<- as.factor(data_train$",colnames(data_train[i]),")")
+  eval(parse(text=command))
+}
+for(i in 6:11){
+  command <- str_c("data_test$",colnames(data_test[i]),"<- as.factor(data_test$",colnames(data_test[i]),")")
+  eval(parse(text=command))
+}
+
+data_train <- data_train %>% mutate(YEAR = lubridate::year(START_TIME),MONTH = lubridate::month(START_TIME), DAY = lubridate::day(START_TIME),HOUR = lubridate::hour(START_TIME))
+data_test <- data_test %>% mutate(YEAR = lubridate::year(START_TIME),MONTH = lubridate::month(START_TIME), DAY = lubridate::day(START_TIME),HOUR = lubridate::hour(START_TIME))
+data_train$HOUR_MINUTE <- format(data_train$START_TIME,"%H:%M")
+data_test$HOUR_MINUTE <- format(data_test$START_TIME,"%H:%M")
+
+```
+
+##Passage des varibales TAP_VERSION et CONNECTION_ID en facteur
+```{r}
+data_train$TAP_VERSION<-as.factor(data_train$TAP_VERSION)
+data_train$CONNECTION_ID<-as.factor(data_train$CONNECTION_ID)
+data_train$TAP_EXIT_STATUS<-as.factor(data_train$TAP_EXIT_STATUS)
+#O qd ca se passe bien
+
+data_test$TAP_VERSION<-as.factor(data_test$TAP_VERSION)
+data_test$CONNECTION_ID<-as.factor(data_test$CONNECTION_ID)
+data_test$TAP_EXIT_STATUS<-as.factor(data_test$TAP_EXIT_STATUS)
+```
+
+#Creation d'une variable WEEK_END
+Les processus sont surement plus enclin à être moins long en temps d'execution le week-end car il y a moins de monde sur les serveurs
+```{r}
+fWEEK_END <- function(x){
+  if(x=="samedi" || x=="dimanche"){
+    return(1)
+  }
+    else{
+    return(0)
+  }
+  
+}
+data_train$WEEK_END <- sapply(data_train$Jour,fWEEK_END)
+data_test$WEEK_END <- sapply(data_test$Jour,fWEEK_END)
+
+data_train$WEEK_END <- as.factor(data_train$WEEK_END)
+data_test$WEEK_END <- as.factor(data_test$WEEK_END)
+```
+
+
+##Nous allons enlever les NA, les cellules sans valeurs
+```{r}
+data_train=na.omit(data_train)
+```
+
+#Suppression des jobs non effectué
+On supprime les données dont TAP_EXIT_STATUS == 1, car elles ne sont qu'au nombre de 4 et ne sont pas utile pour les modèles, et seront donc plus des outliers puisque si le job ne s'est pas effectué entièrement alors la durée (JOB_DURATION) risque d'être élevée.
+
+```{r}
+data_train <- subset(data_train, data_train$TAP_EXIT_STATUS == 0)
+```
+
+#Mis en place de nouvelles variables pour les versions du logiciel
+On a remarqué que les versions de logiciels ont des similutudes ou sont completement differentes. par exemple il y a 4 version de 1.17 qui sont donc assez proche niveaux lociciels, mais il y a aussi une grosse difference de version entre ceux de la premiere version (1.) et de la deuxieme version (2.)
+dans un premier temps, on crée une premiere variable qui differencie les deux versions differentes du logiciel, et une autre qui regroupera les sous versions de mise à jour
+Les facteurs sont odonnée par niveaux car les versions
+Cette partie de code est en en dur
+
+```{r}
+f_Version <- function (x){
+  if(x=="2.6.4"||x=="2.6.5"){
+    return(1)
+  }
+  else{
+    return(0)
+  }
+}
+data_train$VERSION <- sapply(data_train$TAP_VERSION, f_Version)
+data_train$VERSION <- factor(data_train$VERSION)
+
+f_SousVersion <- function (x){
+  if(x=="1.15.1"){
+    return(1)
+  }
+  if(x=="1.16.0"){
+    return(2)
+  }
+  if(x=="1.17.0"||x=="1.17.1"||x=="1.17.2"||x=="1.17.3"||x=="1.17.4"){
+    return(3)
+  }
+  if(x=="1.4.33"||x=="1.4.34"){
+    return(4)
+  }
+  if(x=="2.6.4"||x=="2.6.5"){
+    return(5)
+  }
+}
+data_train$SOUS_VERSION <- sapply(data_train$TAP_VERSION, f_SousVersion)
+data_train$SOUS_VERSION <- factor(data_train$SOUS_VERSION, ordered=TRUE, levels =c("1","2","3","4","5"))
+
+```
+
+#Creation de la variable temps en UNIX
+```{r}
+data_train$START_TIME_UNIX <- as.numeric(data_train$START_TIME)
+```
+
+#Mise en place des variables dans data test
+```{r}
+data_test$SOUS_VERSION <- sapply(data_test$TAP_VERSION, f_SousVersion)
+data_test$SOUS_VERSION <- factor(data_test$SOUS_VERSION, ordered=TRUE, levels =c("1","2","3","4","5"))
+data_test$START_TIME_UNIX <- as.numeric(data_test$START_TIME)
+data_test$TAP_VERSION <- factor(data_test$TAP_VERSION, ordered=TRUE, levels=c("1.15.1","1.16.0","1.17.0","1.17.1","1.17.2","1.17.3","1.17.4","1.4.33","1.4.34","2.6.4","2.6.5") )
+data_test$VERSION <- sapply(data_test$TAP_VERSION, f_Version)
+data_test$VERSION <- factor(data_test$VERSION, ordered=TRUE, levels=c("0","1")) 
+```
+
+##Nous allons diviser notre distribution en 3 sous groupes
+Chaque groupes correspond ? un type de CONNECTION_ID
+```{r}
+data_train1<-data_train[data_train$CONNECTION_ID==1,]
+data_train2<-data_train[data_train$CONNECTION_ID==2,]
+data_train3<-data_train[data_train$CONNECTION_ID==3,]
+```
+Nous avons divise notre base de donnees en trois sous groupes, chaque groupe correspondant a une connection_ID
+
+##Nous allons regarder la distribution grace ? des plots
+```{r}
+plot(data_train1$JOB_DURATION~data_train1$START_TIME)
+plot(density(data_train1$JOB_DURATION))
+plot(data_train2$JOB_DURATION~data_train2$START_TIME)
+plot(density(data_train2$JOB_DURATION))
+plot(data_train3$JOB_DURATION~data_train3$START_TIME)
+plot(density(data_train3$JOB_DURATION))
+```
+Au regard de l'allure du boxplot, nous pouvons penser que notre distributio n'est pas gaussienne.Avec le graphique de densit?, notre distribution n'est pas gausienne, il semble y avoir 3 distributions.
+Sur la distribution concernant JOB_DURATION = 1, nous allons retirer ttes les valeurs quand JOB_DURATION est sup?rieur ? 20
+Sur la distribution concernant JOB_DURATION = 2, nous allons retirer ttes les valeurs quand JOB_DURATION est sup?rieur ? 250
+Sur la distribution concernant JOB_DURATION = 3, nous allons retirer ttes les valeurs quand JOB_DURATION est sup?rieur ? 3500 et inf?rieur ? 1000
+
+#Nous allons r?tirer les valeurs dites au-dessus
+```{r}
+data_train1<-subset(data_train1, data_train1$JOB_DURATION<=60, drop=FALSE)
+data_train2<-subset(data_train2, data_train2$JOB_DURATION>=100 & JOB_DURATION <=300, drop=FALSE)
+data_train3<-subset(data_train3, data_train3$JOB_DURATION<=3000 & data_train3$JOB_DURATION>=1500, drop=FALSE)
+```
+
+#V?rification de l'asym?trie
+```{r}
+
+medcouple(data_train1$JOB_DURATION, do.reflect = NULL)
+medcouple(data_train2$JOB_DURATION, do.reflect = NULL)
+medcouple(data_train3$JOB_DURATION, do.reflect = NULL)
+
+```
+Au vue du r?sultat du medcouple, nos donn?es ont une asym?trie ? droite par rapport ? la moyenne, puisque que le r?sultats des trois fonctions sont positifs.
+
+#Nous retestons les plots pour voir leur forme graphique apr?s retrait des individus atypiques
+```{r} 
+plot(density(data_train1$JOB_DURATION))
+plot(density(data_train2$JOB_DURATION))
+plot(density(data_train3$JOB_DURATION))
+```
+Nous voyons que sur le plot de la distribution train 1, on dirait q'il y a une forme de saisonnailit?, avec une forme sinusoidale
+les 2 autres graphiques ont plus une forme de loi normale, une courbe en cloche. 
+
+#Nous reconstuire la base data_train pour la confection de nos mod?les
+```{r}
+data_train_nv<-full_join(data_train1,data_train3)
+data_train_nv<-full_join(data_train_nv,data_train2)
+```
+
+#Creation fonction pour calculer R²
+```{r}
+RSQUARE <- function(y_actual,y_predict){
+  return(cor(y_actual,y_predict)^2)
+}
+```
+#Creation variable SEUIL_HOUR_3
+Creation de la variable pour avoir 3 différents niveaux d'intensite au niveau des HOUR
+```{r}
+fSEUIL_3_CONNECTION_1 <- function(x){
+  if(x==4){
+    return(3)
+  }
+  if(x==5 || x==6){
+    return(2)
+  }
+  else{
+    return(1)
+  }
+}
+fSEUIL_3_CONNECTION_2 <- function(x){
+  if((x>=15 & x<=23) || x==11 || x==6 || x==0){
+    return(2)
+  }
+  if(x==9){
+    return(3)
+  }
+  else{
+    return(1)
+  }
+}
+fSEUIL_3_CONNECTION_3 <- function(x){
+  if(x>=15 & x<=22){
+    return(3)
+  }
+  if(x==2 || x==3 || x==4 || x==7 || x==9 || x==10 || x==12){
+    return(1)
+  }
+  else{
+    return(2)
+  }
+}
+fSEUIL_3 <- function(x){
+  x_CO_1 <- subset(x,x$CONNECTION_ID == 1)
+  x_CO_2 <- subset(x,x$CONNECTION_ID == 2)
+  x_CO_3 <- subset(x,x$CONNECTION_ID == 3)
+  x_CO_1$SEUIL_HOUR_3 <- sapply(x_CO_1$HOUR,fSEUIL_3_CONNECTION_1)
+  x_CO_2$SEUIL_HOUR_3 <- sapply(x_CO_2$HOUR,fSEUIL_3_CONNECTION_2)
+  x_CO_3$SEUIL_HOUR_3 <- sapply(x_CO_3$HOUR,fSEUIL_3_CONNECTION_3)
+  data <- rbind(x_CO_1,x_CO_2)
+  data <- rbind(data,x_CO_3)
+  data$SEUIL_HOUR_3 <- factor(data$SEUIL_HOUR_3, ordered=TRUE, levels=c(1,2,3))
+  return(data)
+}
+data_train_nv2 <- fSEUIL_3(data_train_nv2)
+data_test <- fSEUIL_3(data_test)
+```
+
+
+
+#Creation variable SEUIL_HOUR_4
+Creation de la variable pour avoir 4 différents niveaux d'intensite au niveau des HOUR
+```{r}
+fSEUIL_4_CONNECTION_1 <- function(x){
+  if(x==4){
+    return(4)
+  }
+  if(x==5){
+    return(3)
+  }
+  if( x==17 || x==18){
+    return(2)
+  }
+  else{
+    return(1)
+  }
+}
+fSEUIL_4_CONNECTION_2 <- function(x){
+  if((x>=16 & x<=22) || x==11 || x==6){
+    return(3)
+  }
+  if(x==9){
+    return(4)
+  }
+  if(x==0 || x==23 || x==15 || x==2 || x==3 || x==10){
+    return(2)
+  }
+  else{
+    return(1)
+  }
+}
+fSEUIL_4_CONNECTION_3 <- function(x){
+  if(x>=15 & x<=22){
+    return(4)
+  }
+  if(x==1 || x==23 || x==5 || x==6 || x==8 || x==14 ){
+    return(3)
+  }
+  if(x==9){
+    return(1)
+  }
+  else{
+    return(2)
+  }
+}
+fSEUIL_4 <- function(x){
+  x_CO_1 <- subset(x,x$CONNECTION_ID == 1)
+  x_CO_2 <- subset(x,x$CONNECTION_ID == 2)
+  x_CO_3 <- subset(x,x$CONNECTION_ID == 3)
+  x_CO_1$SEUIL_HOUR_4 <- sapply(x_CO_1$HOUR,fSEUIL_4_CONNECTION_1)
+  x_CO_2$SEUIL_HOUR_4 <- sapply(x_CO_2$HOUR,fSEUIL_4_CONNECTION_2)
+  x_CO_3$SEUIL_HOUR_4 <- sapply(x_CO_3$HOUR,fSEUIL_4_CONNECTION_3)
+  data <- rbind(x_CO_1,x_CO_2)
+  data <- rbind(data,x_CO_3)
+  data$SEUIL_HOUR_4 <- factor(data$SEUIL_HOUR_4, ordered=TRUE, levels=c(1,2,3,4))
+  return(data)
+}
+data_train_nv2 <- fSEUIL_4(data_train_nv2)
+data_test <- fSEUIL_4(data_test)
+```
+
+#Boucle For pour cross validation afin de trouver le meilleur modele pour une formule en fonction du MAPE
+Cela permet d'essayer un maximum de modele avec differente partition de CV et de choisis le meilleur parmi ceux la
+
+```{r}
+
+
+set.seed(1586247)
+
+intrain<-createDataPartition(data_train_nv$JOB_DURATION,p=0.65,list=FALSE)
+intrain <- sample(intrain,length(intrain),replace=FALSE)
+Bdata_train_cv<-data_train_nv[intrain,]
+Bdata_train_val<-data_train_nv[-intrain,]
+Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+
+modelPrinc<-gam(JOB_DURATION~CONNECTION_ID, sp=0.0000000001, k=1000, data=Bdata_train_cv)
+summary(modelPrinc)
+print(RSQUARE(Bdata_train_cv$JOB_DURATION,modelPrinc$fitted.values))
+BPred <- predict(modelPrinc, Bdata_train_val)
+B_MAPE <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+Bdata_train_val$Pred <- BPred
+B_MAPE
+
+for (i in 1:350){
+  set.seed(1586247)
+  #Cross Validation
+  intrain<-createDataPartition(data_train_nv$JOB_DURATION,p=0.5+(i*0.001),list=FALSE)
+  intrain <- sample(intrain,length(intrain),replace=FALSE)
+  Bdata_train_cv<-data_train_nv[intrain,] 
+  Bdata_train_val<-data_train_nv[-intrain,]
+  Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+  Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+  
+  modelSecond<-gam(JOB_DURATION~CONNECTION_ID, data=Bdata_train_cv)
+  BPred <- predict(modelPrinc, Bdata_train_val)
+  B_MAPE2 <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+  
+  if(B_MAPE2 <= B_MAPE){
+    modelPrinc <- modelSecond
+    B_MAPE <- B_MAPE2
+  }
+}
+B_MAPE
+```
+#Prevision
+```{r}
+data_sample$Predicted <- predict(modelPrinc, data_test)
+
+write.csv(data_sample, "C:/Users/33640/OneDrive/Bureau/Modele Additif Generalise/data/data_sample_GOOD.csv", row.names = FALSE)
+```
+
+#Mise en place de 3 modele avec un pour chaque connection ID e
+#SUppression de toutes les observations en fonction des SOUS_VERSION
+On remarque que dans data test beaucoup des taps version ne sont pas presente pourtant une veritable difference s'effectue dans le JOB_DURATION entre elles nous allons donc supprimer des bases celle qui ne sont pas presente dans le data_test, on garde donc les opbservations concernant les SOUS_VERSION 3,4,5
+```{r}
+data_train1<-data_train[data_train$CONNECTION_ID==1 & data_train$SOUS_VERSION==3,]
+data_train2<-data_train[data_train$CONNECTION_ID==2,]
+data_train3<-data_train[data_train$CONNECTION_ID==3,]
+data_test1<-data_test[data_test$CONNECTION_ID==1,]
+data_test2<-data_test[data_test$CONNECTION_ID==2,]
+data_test3<-data_test[data_test$CONNECTION_ID==3,]
+```
+
+#Mise en place modele pour CONNECTION_ID = 1
+#Detection OUtlier
+On remarque que les points atypique sont en fait lié à des heures minutes precise mais aussi a des dates, comme le montre le graphique 3
+Avec le graphique 2, on remarque 2 valeurs atypique concernant HOur = 1 et Hour = 23, puis avec le graphique 3 on remarque 2 nouvelles valeurs atypiques
+```{r}
+ggplot(data = filter(data_train1),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1),
+       mapping = aes(x = HOUR_FC, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1, HOUR == 4 | HOUR == 5),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+```
+#Suppression Outlier
+On remarque qu'il y a changement de niveau en mars pour les differentes horaires, cependant concernant le data_test les dates commencent en mai, il faut donc supprimer tout ce qui se passe avant mars afin que le modele ne le prenne pas en compte
+En etudiant par HOUR les job duration on remarque encore certain outlier
+```{r}
+data_train1_2 <- subset(data_train1, HOUR!=4 & HOUR!=5 & JOB_DURATION <19 & JOB_DURATION >=8)
+data_train1_2 <- rbind(data_train1_2,subset(data_train1, HOUR_MINUTE_FC == "04:41" & JOB_DURATION > 40))
+data_train1_2 <- rbind(data_train1_2,subset(data_train1, HOUR_MINUTE_FC == "04:41" & JOB_DURATION < 20))
+data_train1_2 <- rbind(data_train1_2,subset(data_train1, HOUR_MINUTE_FC == "05:41" & JOB_DURATION < 50))
+
+ggplot(data = filter(data_train1_2),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_2),
+       mapping = aes(x = HOUR_FC, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_2, HOUR == 4 | HOUR == 5),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_2, HOUR == 0 | HOUR==2 | HOUR == 21 | HOUR ==17),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_2, (HOUR == 4 | HOUR == 5) & MONTH == 3),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_2, (HOUR == 0 | HOUR==2 | HOUR == 21 | HOUR ==17) & MONTH == 3),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_2, (HOUR != 4 & HOUR != 5) & MONTH == 3),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+
+data_train1_3 <- subset(data_train1_2, MONTH >=4)
+
+ggplot(data = filter(data_train1_3),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_3),
+       mapping = aes(x = HOUR_FC, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_3, HOUR == 4 | HOUR == 5),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_3, HOUR == 0 | HOUR==2 | HOUR == 21 | HOUR ==17),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_3, HOUR ==  3),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_3, HOUR ==  16),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_3, HOUR ==  20),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+
+data_train1_4 <- subset(data_train1_3, HOUR==3 & JOB_DURATION <12)
+data_train1_4 <- rbind(data_train1_4,subset(data_train1_3, HOUR==5 & JOB_DURATION <44 & JOB_DURATION > 35))
+data_train1_4 <- rbind(data_train1_4,subset(data_train1_3, HOUR==16 & JOB_DURATION <14))
+data_train1_4 <- rbind(data_train1_4,subset(data_train1_3, HOUR==20 & JOB_DURATION <14))
+data_train1_4 <- rbind(data_train1_4, subset(data_train1_3, HOUR != 3 & HOUR != 5 & HOUR != 16 & HOUR != 20))
+
+ggplot(data = filter(data_train1_4),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train1_4),
+       mapping = aes(x = HOUR_FC, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+```
+
+#Mise en place en facteur ordonné des HOUR
+On ordonne les HOUR en fonction de leur moyenne 
+```{r}
+Vec <- aggregate(data_train1_4$JOB_DURATION, list(data_train1_4$HOUR), mean)
+
+data_train1_4$HOUR_FC <- factor(data_train1_4$HOUR_FC,ordered=TRUE,levels=c("3","16","11","4","12","13","18","9","1","14","2","0","19","10","20","17","15","21","23","22","8","6","7","5"))
+```
+
+#On test des modeles
+```{r}
+set.seed(1586247)
+
+intrain<-createDataPartition(data_train1_4$JOB_DURATION,p=0.65,list=FALSE)
+intrain <- sample(intrain,length(intrain),replace=FALSE)
+Bdata_train_cv<-data_train1_4[intrain,]
+Bdata_train_val<-data_train1_4[-intrain,]
+Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+
+modelPrinc<-gam(JOB_DURATION~HOUR_FC+WEEK_END, sp=0.0000000001, k=1000, data=Bdata_train_cv)
+summary(modelPrinc)
+print(RSQUARE(Bdata_train_cv$JOB_DURATION,modelPrinc$fitted.values))
+BPred <- predict(modelPrinc, Bdata_train_val)
+B_MAPE <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+Bdata_train_val$Pred <- BPred
+B_MAPE
+
+for (i in 1:350){
+  set.seed(1586247)
+  #Cross Validation
+  intrain<-createDataPartition(data_train1_4$JOB_DURATION,p=0.5+(i*0.001),list=FALSE)
+  intrain <- sample(intrain,length(intrain),replace=FALSE)
+  Bdata_train_cv<-data_train1_4[intrain,] 
+  Bdata_train_val<-data_train1_4[-intrain,]
+  Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+  Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+  
+  modelSecond<-gam(JOB_DURATION~HOUR_FC+WEEK_END, data=Bdata_train_cv)
+  BPred <- predict(modelPrinc, Bdata_train_val)
+  B_MAPE2 <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+  
+  if(B_MAPE2 <= B_MAPE){
+    modelPrinc <- modelSecond
+    B_MAPE <- B_MAPE2
+  }
+}
+B_MAPE
+```
+#Prediction sur data_test1
+```{r}
+data_test1$Predicted <- predict(modelPrinc, data_test1)
+```
+
+#Mise en place du modele pour CONNECTION_ID = 2
+#Detection et Suppression OUtlier en fonction des HOUR_MINUTE
+On remarque que les points atypique sont en fait lié à des heures minutes precise mais aussi a des dates, comme le montre le graphique 3
+```{r}
+ggplot(data = filter(data_train2),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train2),
+       mapping = aes(x = HOUR_FC, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+# ggplot(data = filter(data_train2,( HOUR == 6 | HOUR == 7) & WEEK_END == 1),
+#        mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(TAP_VERSION))) + geom_point()
+# ggplot(data = filter(data_train2,( HOUR == 6 | HOUR == 7) & WEEK_END == 0),
+#        mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(DAY))) + geom_point()
+ggplot(data = filter(data_train2, HOUR == 11 & WEEK_END == 1),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train2, HOUR == 11 & WEEK_END == 0),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+
+#Suppression 
+data_train2_2 <- subset(data_train2, HOUR == 0 & JOB_DURATION <200)
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==1 & JOB_DURATION<=185))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,(HOUR==4 | HOUR==5) & JOB_DURATION<=180))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==3 & JOB_DURATION<=190 & JOB_DURATION >=155))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==9 & WEEK_END == 0 & JOB_DURATION<=275 & JOB_DURATION >= 200))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==9 & WEEK_END == 1 & JOB_DURATION<=250 & JOB_DURATION >=200))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==2 & WEEK_END == 0 & JOB_DURATION<=190))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==2 & WEEK_END == 1 & JOB_DURATION <=180))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,(HOUR==8|HOUR==10 | HOUR==13) & JOB_DURATION <=190))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==11 & HOUR_MINUTE_FC=="11:09" & WEEK_END==1 & JOB_DURATION <=210 & JOB_DURATION >= 175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==11 & HOUR_MINUTE_FC=="11:39" & WEEK_END==1 & JOB_DURATION <=175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==11 & HOUR_MINUTE_FC=="11:09" & WEEK_END==0 & JOB_DURATION <=225 & JOB_DURATION >= 180))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==11 & HOUR_MINUTE_FC=="11:39" & WEEK_END==0))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==12 & WEEK_END == 0 & JOB_DURATION<=200))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==12 & WEEK_END == 1 & JOB_DURATION <=180))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==14 & WEEK_END == 0 & JOB_DURATION<=190 & (HOUR_MINUTE_FC == "14:09" | HOUR_MINUTE_FC == "14:39")))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==14 & WEEK_END == 1 & JOB_DURATION <=190))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==15 & JOB_DURATION<=200 & (HOUR_MINUTE_FC == "15:09" | HOUR_MINUTE_FC == "15:39")))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==16 & WEEK_END == 0 & JOB_DURATION<=200))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==16 & WEEK_END == 1 & JOB_DURATION <=180))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==17 & WEEK_END == 0 & JOB_DURATION<=225))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==17 & WEEK_END == 1 & JOB_DURATION <=175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==18 & WEEK_END == 1 & JOB_DURATION<=180 & HOUR_MINUTE_FC == "18:09"))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==18 & WEEK_END == 1 & JOB_DURATION<=180 & HOUR_MINUTE_FC == "18:39"))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==18 & WEEK_END == 0 & JOB_DURATION<=220 & HOUR_MINUTE_FC == "18:09"))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==18 & WEEK_END == 0 & JOB_DURATION<=220 & HOUR_MINUTE_FC == "18:39"))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==19 & JOB_DURATION <=210))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==20 & WEEK_END == 0 & JOB_DURATION<=210))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==20 & WEEK_END == 1 & JOB_DURATION <=175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==21 & WEEK_END == 0 & JOB_DURATION<=210))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==21 & WEEK_END == 1 & JOB_DURATION <175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==22 & WEEK_END == 0 & JOB_DURATION<=210))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==22 & WEEK_END == 1 & JOB_DURATION <=175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==23 & WEEK_END == 0 & JOB_DURATION<=200))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==23 & WEEK_END == 1 & JOB_DURATION <=175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==6 & WEEK_END == 0 & JOB_DURATION<=200))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==6 & WEEK_END == 1 & JOB_DURATION <=175))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==7 & WEEK_END == 0 & JOB_DURATION<=200))
+data_train2_2 <- rbind(data_train2_2, subset(data_train2,HOUR==7 & WEEK_END == 1 & JOB_DURATION >=160))
+
+#On supprime les donnes avant le 15 juillet car elles apparaissent comme étant differente et le data_test commence en aout
+
+data_train2_3 <- subset(data_train2_2, START_TIME > "2020-07-15")
+
+#On enleve les données dont le HOUR_MINUTE_FC n'apparait pas dans data_test
+#Il faut enlever 2:10 et 3:10
+
+data_train2_4 <- subset(data_train2_3, HOUR_MINUTE_FC != "02:10")
+data_train2_4 <- subset(data_train2_4, HOUR_MINUTE_FC != "03:10")
+
+
+```
+
+
+#Mise en facteur ordonné des HEURE_MINUTE
+```{r}
+Vec <- aggregate(data_train2_4$JOB_DURATION, list(data_train2_4$HOUR_MINUTE_FC), mean)
+Vec <- Vec[order(Vec$x),]
+
+data_train2_4$HOUR_MINUTE_FC <- factor(data_train2_4$HOUR_MINUTE_FC, ordered = TRUE, levels=c("04:39","02:39", "06:39", "05:39", "03:39" ,"07:39","11:39" ,"08:39", "12:39", "10:39", "13:39", "01:39", "04:09", "14:39", "05:09", "03:09" ,"00:39" ,"01:09" ,"07:09" ,"08:09" ,"06:09" ,"10:09" ,"23:39" ,"02:09" ,"13:09" ,"12:09", "15:39", "14:09", "00:09", "15:09", "16:39", "17:39", "22:39", "18:39", "16:09", "23:09", "21:39", "19:39", "20:39", "22:09", "17:09","18:09", "19:09", "21:09", "20:09","11:09", "09:09", "09:39"))
+
+```
+
+#On test des modeles
+```{r}
+set.seed(1586247)
+
+intrain<-createDataPartition(data_train2_4$JOB_DURATION,p=0.65,list=FALSE)
+intrain <- sample(intrain,length(intrain),replace=FALSE)
+Bdata_train_cv<-data_train2_4[intrain,]
+Bdata_train_val<-data_train2_4[-intrain,]
+Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+
+modelPrinc<-gam(JOB_DURATION~HOUR_MINUTE_FC+WEEK_END, sp=0.0000000001, k=1000, data=Bdata_train_cv)
+summary(modelPrinc)
+print(RSQUARE(Bdata_train_cv$JOB_DURATION,modelPrinc$fitted.values))
+BPred <- predict(modelPrinc, Bdata_train_val)
+B_MAPE <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+Bdata_train_val$Pred <- BPred
+B_MAPE
+
+for (i in 1:350){
+  set.seed(1586247)
+  #Cross Validation
+  intrain<-createDataPartition(data_train2_4$JOB_DURATION,p=0.5+(i*0.001),list=FALSE)
+  intrain <- sample(intrain,length(intrain),replace=FALSE)
+  Bdata_train_cv<-data_train2_4[intrain,] 
+  Bdata_train_val<-data_train2_4[-intrain,]
+  Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+  Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+  
+  modelSecond<-gam(JOB_DURATION~HOUR_MINUTE_FC+WEEK_END, data=Bdata_train_cv)
+  BPred <- predict(modelPrinc, Bdata_train_val)
+  B_MAPE2 <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+  
+  if(B_MAPE2 <= B_MAPE){
+    modelPrinc <- modelSecond
+    B_MAPE <- B_MAPE2
+  }
+}
+B_MAPE
+```
+#Prediction sur data_test2
+```{r}
+data_test2$Predicted <- predict(modelPrinc, data_test2)
+```
+
+#Mise en place du modele pour CONNECTION_ID = 3
+#Detection et Suppression OUtlier en fonction des HOUR_MINUTE
+```{r}
+ggplot(data = filter(data_train3),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train3),
+       mapping = aes(x = HOUR_FC, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train3, HOUR == 0 & WEEK_END == 1),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+ggplot(data = filter(data_train3, HOUR == 0 & WEEK_END == 0),
+       mapping = aes(x = START_TIME, y = JOB_DURATION, color = factor(HOUR_MINUTE))) + geom_point()
+
+
+#Suppression outlier
+
+data_train3_2 <- subset(data_train3,(HOUR_MINUTE=="00:00" | HOUR_MINUTE=="00:01") & WEEK_END == 1 & JOB_DURATION >=1400)
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="00:00"|HOUR_MINUTE=="00:01") & WEEK_END == 0 & JOB_DURATION >=1500 & JOB_DURATION <=2200))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="01:00"|HOUR_MINUTE=="01:01") & WEEK_END == 1 & JOB_DURATION <=1900))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="01:00"|HOUR_MINUTE=="01:01") & WEEK_END == 0 & JOB_DURATION >=1800))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="02:00"|HOUR_MINUTE=="02:01") & WEEK_END == 1 & JOB_DURATION <=1800))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="02:00"|HOUR_MINUTE=="02:01") & WEEK_END == 0 & JOB_DURATION >1500 & JOB_DURATION <2000))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,HOUR_MINUTE=="03:00" & WEEK_END == 1 & JOB_DURATION <=1800 & JOB_DURATION >=1500))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,HOUR_MINUTE=="03:01" & WEEK_END == 1 & JOB_DURATION <=1700))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,HOUR_MINUTE=="03:00" & WEEK_END == 0 & JOB_DURATION <=1950 & JOB_DURATION >=1600))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,HOUR_MINUTE=="03:01" & WEEK_END == 0 & JOB_DURATION <=1800))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="04:00"|HOUR_MINUTE=="04:01") & WEEK_END == 1 & JOB_DURATION >=1450 & JOB_DURATION <1750))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="04:00"|HOUR_MINUTE=="04:01") & WEEK_END == 0 & JOB_DURATION <=2000))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="05:00"|HOUR_MINUTE=="05:01") & WEEK_END == 1 & JOB_DURATION <=2000 & JOB_DURATION>=1650))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="05:00") & WEEK_END == 0 & JOB_DURATION >=1750 & JOB_DURATION <=2100))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="05:01") & WEEK_END == 0 & JOB_DURATION >=1800))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="06:00"|HOUR_MINUTE=="06:01") & WEEK_END == 1 & JOB_DURATION <=2050 & JOB_DURATION>=1750))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="06:00"|HOUR_MINUTE=="06:01") & WEEK_END == 0 & JOB_DURATION >=1500))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="07:00"|HOUR_MINUTE=="07:01") & WEEK_END == 1 & JOB_DURATION >=1620))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="07:00"|HOUR_MINUTE=="07:01") & WEEK_END == 0 & JOB_DURATION >=1500 & JOB_DURATION <1900))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="08:00") & WEEK_END == 1))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="08:01") & WEEK_END == 1 & JOB_DURATION >= 1700 & JOB_DURATION <= 2000))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="08:00"|HOUR_MINUTE=="08:01") & WEEK_END == 0 & JOB_DURATION >=1700 & JOB_DURATION <=2200))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="09:00"|HOUR_MINUTE=="09:01") & WEEK_END == 1 & JOB_DURATION <=1750 & JOB_DURATION >=1400))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="09:00"|HOUR_MINUTE=="09:01"|HOUR_MINUTE=="9:03") & WEEK_END == 0 & JOB_DURATION >=1500 & JOB_DURATION<2000))
+#Concernant les horaires du data_test = 10:03, 11:03, 12:03 nous ocnsiderons que ce sont les processus de 10:02, 11:02, 12:02 respectivement qui ont commencé en retard
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="10:00"|HOUR_MINUTE=="10:01"|HOUR_MINUTE=="10:02") & WEEK_END == 1 & JOB_DURATION<=1650))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="10:00"|HOUR_MINUTE=="10:01"|HOUR_MINUTE=="10:02") & WEEK_END == 0 & JOB_DURATION >=1600 & JOB_DURATION<2100))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="11:00"|HOUR_MINUTE=="11:01"|HOUR_MINUTE=="11:02") & WEEK_END == 1 & JOB_DURATION<=1700 & JOB_DURATION>=1500))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="11:00"|HOUR_MINUTE=="11:01"|HOUR_MINUTE=="11:02") & WEEK_END == 0 & JOB_DURATION >=1700 & JOB_DURATION<2200))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="12:00"|HOUR_MINUTE=="12:01"|HOUR_MINUTE=="12:02") & WEEK_END == 1 & JOB_DURATION<=1650))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="12:00"|HOUR_MINUTE=="12:01"|HOUR_MINUTE=="12:02") & WEEK_END == 0 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="13:00"|HOUR_MINUTE=="13:01") & WEEK_END == 1 & JOB_DURATION >=1450))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="13:00"|HOUR_MINUTE=="13:01") & WEEK_END == 0 & JOB_DURATION >=1600 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="14:00"|HOUR_MINUTE=="14:01") & WEEK_END == 1 & JOB_DURATION>=1450))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="14:00"|HOUR_MINUTE=="14:01") & WEEK_END == 0 & JOB_DURATION >1710 & JOB_DURATION <2625 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="15:00"|HOUR_MINUTE=="15:01") & WEEK_END == 1 & JOB_DURATION>1540))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="15:00"|HOUR_MINUTE=="15:01") & WEEK_END == 0 & JOB_DURATION >2125))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="16:00"|HOUR_MINUTE=="16:01") & WEEK_END == 1 & JOB_DURATION<2000))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="16:01") & WEEK_END == 0 & JOB_DURATION >=2275 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="16:00") & WEEK_END == 0 & JOB_DURATION >=2275 & JOB_DURATION<3000 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="17:00"|HOUR_MINUTE=="17:01") & WEEK_END == 1 & JOB_DURATION<1870))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="17:00") & WEEK_END == 0 & JOB_DURATION <=3250 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="17:01") & WEEK_END == 0 & JOB_DURATION))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="18:00"|HOUR_MINUTE=="18:01") & WEEK_END == 1 & JOB_DURATION >=1500 & JOB_DURATION < 1900))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="18:00"|HOUR_MINUTE=="18:01") & WEEK_END == 0 & JOB_DURATION >=2200 & JOB_DURATION<3200 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="19:00"|HOUR_MINUTE=="19:01") & WEEK_END == 1 & JOB_DURATION >=1500 & JOB_DURATION < 1900))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="19:00"|HOUR_MINUTE=="19:01") & WEEK_END == 0 & JOB_DURATION <=3000 & JOB_DURATION >2125 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="20:00"|HOUR_MINUTE=="20:01") & WEEK_END == 1 & JOB_DURATION >1460 & JOB_DURATION<1800))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="20:00"|HOUR_MINUTE=="20:01") & WEEK_END == 0 & JOB_DURATION >=2000 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="21:00"|HOUR_MINUTE=="21:01") & WEEK_END == 1 & JOB_DURATION <=2150))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="21:00"|HOUR_MINUTE=="21:01") & WEEK_END == 0 & JOB_DURATION >=2000 &JOB_DURATION<3500 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="22:00"|HOUR_MINUTE=="22:01") & WEEK_END == 1 & JOB_DURATION <=1850))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="22:00"|HOUR_MINUTE=="22:01") & WEEK_END == 0 & JOB_DURATION >=2000 ))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="23:00"|HOUR_MINUTE=="23:01") & WEEK_END == 1 & JOB_DURATION <=1700))
+data_train3_2 <- rbind(data_train3_2,subset(data_train3,(HOUR_MINUTE=="23:00"|HOUR_MINUTE=="23:01") & WEEK_END == 0 & JOB_DURATION <=2500 ))
+
+```
+#Changements des horaires 10:03, 11:03, 12:03 du data test
+```{r}
+Modif_Valeur <- function(x){
+  if(x=="10:03"){
+    return("10:01")
+  }
+  if(x=="11:03"){
+    return("11:01")
+  }
+  if(x=="12:03"){
+    return("12:01")
+  }
+  if(x=="08:03"){
+    return("08:01")
+  }
+  if(x=="11:02"){
+    return("11:01")
+  }
+  if(x=="12:02"){
+    return("12:01")
+  }
+  if(x=="10:02"){
+    return("10:01")
+  }
+  if(x=="07:06"){
+    return("07:01")
+  }
+  if(x=="09:03"){
+    return("09:01")
+  }
+  else{
+    return(x)
+  }
+}
+data_test3$HOUR_MINUTE_FC <- sapply(data_test3$HOUR_MINUTE,Modif_Valeur)
+data_test3$HOUR_MINUTE_FC <- as.factor(data_test3$HOUR_MINUTE_FC)
+
+data_train3_2$HOUR_MINUTE_FC <- sapply(data_train3_2$HOUR_MINUTE,Modif_Valeur)
+data_train3_2$HOUR_MINUTE_FC <- as.factor(data_train3_2$HOUR_MINUTE_FC)
+
+```
+
+#Mise en facteur Ordonne de HOUR_MINUTE_FC
+```{r}
+Vec <- aggregate(data_train3_2$JOB_DURATION, list(data_train3_2$HOUR_MINUTE_FC), mean)
+Vec <- Vec[order(Vec$x),]
+
+
+data_train3_2$HOUR_MINUTE_FC <- factor(data_train3_2$HOUR_MINUTE_FC, ordered = TRUE, levels=c("09:01", "09:00", "04:01" ,"04:00" , "03:00" ,"03:01" ,"10:01","02:01" ,"07:01" ,"02:00", "07:00", "10:00", "13:01", "12:01", "12:00", "00:01", "11:01", "00:00",  "11:00" ,"08:01", "13:00", "06:00", "05:00", "01:01","05:01", "08:00", "14:00", "23:00", "06:01", "23:01", "01:00", "14:01", "20:01", "19:00", "15:00", "22:01", "22:00", "20:00", "18:00", "16:00", "18:01", "15:01", "17:00", "19:01", "21:00", "21:01", "17:01", "16:01"))
+
+data_test3
+
+```
+
+#On test des modeles
+```{r}
+set.seed(1586247)
+
+intrain<-createDataPartition(data_train3_2$JOB_DURATION,p=0.65,list=FALSE)
+intrain <- sample(intrain,length(intrain),replace=FALSE)
+Bdata_train_cv<-data_train3_2[intrain,]
+Bdata_train_val<-data_train3_2[-intrain,]
+Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+
+modelPrinc<-gam(JOB_DURATION~HOUR_MINUTE_FC+WEEK_END, sp=0.0000000001, k=1000, data=Bdata_train_cv)
+summary(modelPrinc)
+print(RSQUARE(Bdata_train_cv$JOB_DURATION,modelPrinc$fitted.values))
+BPred <- predict(modelPrinc, Bdata_train_val)
+B_MAPE <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+Bdata_train_val$Pred <- BPred
+B_MAPE
+
+for (i in 1:350){
+  set.seed(1586247)
+  #Cross Validation
+  intrain<-createDataPartition(data_train3_2$JOB_DURATION,p=0.5+(i*0.001),list=FALSE)
+  intrain <- sample(intrain,length(intrain),replace=FALSE)
+  Bdata_train_cv<-data_train3_2[intrain,] 
+  Bdata_train_val<-data_train3_2[-intrain,]
+  Bdata_train_cv <- Bdata_train_cv[order(Bdata_train_cv$START_TIME),]
+  Bdata_train_val <- Bdata_train_val[order(Bdata_train_val$START_TIME),]
+  
+  modelSecond<-gam(JOB_DURATION~HOUR_MINUTE_FC+WEEK_END, data=Bdata_train_cv)
+  BPred <- predict(modelPrinc, Bdata_train_val)
+  B_MAPE2 <- MAPE(BPred,Bdata_train_val$JOB_DURATION)
+  
+  if(B_MAPE2 <= B_MAPE){
+    modelPrinc <- modelSecond
+    B_MAPE <- B_MAPE2
+  }
+}
+B_MAPE
+```
+
+#Prediction sur data_test3
+```{r}
+data_test3$Predicted <- predict(modelPrinc, data_test3)
+```
+
+
+#Concatenation
+```{r}
+sample <- rbind(data_test1[,c(5,21)],data_test2[,c(5,21)])
+sample <- rbind(sample,data_test3[,c(5,21)])
+write.csv(sample, "C:/Users/33640/OneDrive/Bureau/Modele Additif Generalise/data/data_sample_VERYGOOD.csv", row.names = FALSE)
+```
